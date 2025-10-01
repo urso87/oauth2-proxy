@@ -1,0 +1,110 @@
+import requests
+import time
+import smtplib
+from email.mime.text import MIMEText
+import os
+from datetime import datetime
+from dotenv import load_dotenv
+
+# Load .env file (for secrets and configuration)
+load_dotenv()
+
+BTC_WALLET_ADDRESS = os.getenv("BTC_WALLET_ADDRESS", "YOUR_BTC_WALLET_ADDRESS")
+COSMOS_ADDRESS = os.getenv("COSMOS_ADDRESS", "cosmos1en6fc3j6kgacue96wqmjg827kulwn277ehs3v4")
+MIN_USD_AMOUNT = float(os.getenv("MIN_USD_AMOUNT", 15.00))
+NOTIFY_EMAIL = os.getenv("NOTIFY_EMAIL", "iwish3@hotmail.com")
+SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp.gmail.com")
+SMTP_PORT = int(os.getenv("SMTP_PORT", 587))
+SMTP_USER = os.getenv("SMTP_USER", "YOUR_GMAIL_ADDRESS")
+SMTP_PASS = os.getenv("SMTP_PASS", "YOUR_GMAIL_APP_PASSWORD")
+CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", 3600))
+
+TRIGGERED_FILE = "autoswap_triggered.flag"
+LOG_FILE = "fleet_guardian.log"
+
+def log(msg):
+    timestr = datetime.utcnow().isoformat()
+    with open(LOG_FILE, "a") as f:
+        f.write(f"{timestr} {msg}\n")
+    print(msg)
+
+def get_btc_balance(address):
+    url = f"https://api.blockchair.com/bitcoin/dashboards/address/{address}"
+    r = requests.get(url)
+    r.raise_for_status()
+    sats = r.json()['data'][address]['address']['balance']
+    return sats / 1e8
+
+def get_btc_usd_price():
+    url = "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd"
+    r = requests.get(url)
+    r.raise_for_status()
+    return r.json()['bitcoin']['usd']
+
+def create_simpleswap_order(btc_amount, payout_address):
+    url = "https://api.simpleswap.io/v2/create_exchange"
+    data = {
+        "fixed": False,
+        "currency_from": "btc",
+        "currency_to": "atom",
+        "amount_from": btc_amount,
+        "address_to": payout_address
+    }
+    r = requests.post(url, json=data)
+    r.raise_for_status()
+    return r.json()
+
+def send_email_notification(to_email, subject, body):
+    msg = MIMEText(body)
+    msg['Subject'] = subject
+    msg['From'] = SMTP_USER
+    msg['To'] = to_email
+
+    with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
+        server.starttls()
+        server.login(SMTP_USER, SMTP_PASS)
+        server.send_message(msg)
+
+def check_and_swap_btc():
+    btc_balance = get_btc_balance(BTC_WALLET_ADDRESS)
+    btc_price = get_btc_usd_price()
+    usd_value = btc_balance * btc_price
+    log(f"[AutoSwap] BTC Balance: {btc_balance:.8f} | USD Value: ${usd_value:.2f}")
+
+    # Use a file to track if we've already triggered for this threshold
+    if usd_value >= MIN_USD_AMOUNT and not os.path.exists(TRIGGERED_FILE):
+        log(f"[AutoSwap] $15 threshold met. Initiating swap.")
+        order = create_simpleswap_order(btc_balance, COSMOS_ADDRESS)
+        log(f"[AutoSwap] SimpleSwap order created: {order}")
+
+        email_subject = "BTC→ATOM Swap Triggered"
+        email_body = f"""
+Your automated swap has been triggered.
+
+Details:
+BTC Sent: {btc_balance:.8f}
+USD Value: ${usd_value:.2f}
+ATOM Destination: {COSMOS_ADDRESS}
+SimpleSwap Order: {order}
+
+Time: {datetime.utcnow().isoformat()} UTC
+"""
+        send_email_notification(NOTIFY_EMAIL, email_subject, email_body)
+        log(f"[AutoSwap] Notification email sent to {NOTIFY_EMAIL}")
+
+        # Write flag file to prevent retriggering
+        with open(TRIGGERED_FILE, "w") as f:
+            f.write(str(time.time()))
+    elif usd_value < MIN_USD_AMOUNT and os.path.exists(TRIGGERED_FILE):
+        # Reset trigger when balance drops (e.g. after a successful swap)
+        os.remove(TRIGGERED_FILE)
+        log("[AutoSwap] Balance below threshold. Trigger reset.")
+
+if __name__ == "__main__":
+    log("Fleet Guardian started.")
+    while True:
+        try:
+            check_and_swap_btc()
+        except Exception as e:
+            log(f"[AutoSwap] Error: {e}")
+        time.sleep(CHECK_INTERVAL)
