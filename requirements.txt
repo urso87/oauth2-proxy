@@ -1,0 +1,8 @@
+dist/
+build/
+*.spec
+__pycache__/
+*.pyc
+autoswap_triggered.flag
+.env
+fleet_guardian.log
